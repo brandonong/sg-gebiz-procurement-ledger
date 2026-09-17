@@ -6,6 +6,8 @@
     <title>Public Sector Market Intelligence Ledger (GeBIZ)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- PapaParse CDN for high-performance, non-blocking CSV parsing -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
     <style>
         .custom-scrollbar::-webkit-scrollbar { width: 6px; height: 6px; }
         .custom-scrollbar::-webkit-scrollbar-track { background: #1f2937; }
@@ -39,9 +41,9 @@
 
                 <select id="status-filter" class="bg-gray-800 border border-gray-700 text-xs rounded px-2.5 py-2 text-gray-200 focus:outline-none focus:border-blue-500">
                     <option value="ALL">All Expiry Statuses</option>
-                    <option value="Window Open">Window Open (<= 12m)</option>
+                    <option value="Window Open">Window Open (&lt;= 12m)</option>
                     <option value="Pipeline Target">Pipeline Target (12m - 24m)</option>
-                    <option value="Locked">Locked (> 24m)</option>
+                    <option value="Locked">Locked (&gt; 24m)</option>
                 </select>
 
                 <input type="text" id="keyword-search" placeholder="Search title, agency, SI..." class="bg-gray-800 border border-gray-700 text-xs rounded px-3 py-2 text-gray-200 focus:outline-none focus:border-blue-500 w-36 lg:w-44">
@@ -160,87 +162,52 @@
             return { label: "Locked", color: "bg-rose-500/10 text-rose-400 border-rose-500/30", expiryDate };
         }
 
-        function parseCSVLines(csvText) {
-            const lines = [];
-            let curField = '';
-            let curLine = [];
-            let inQuotes = false;
-
-            for (let i = 0; i < csvText.length; i++) {
-                const char = csvText[i];
-                const nextChar = csvText[i + 1];
-
-                if (char === '"') {
-                    if (inQuotes && nextChar === '"') { curField += '"'; i++; }
-                    else { inQuotes = !inQuotes; }
-                } else if (char === ',' && !inQuotes) {
-                    curLine.push(curField.trim());
-                    curField = '';
-                } else if ((char === '\r' || char === '\n') && !inQuotes) {
-                    if (char === '\r' && nextChar === '\n') i++;
-                    curLine.push(curField.trim());
-                    if (curLine.some(f => f.length > 0)) lines.push(curLine);
-                    curLine = [];
-                    curField = '';
-                } else {
-                    curField += char;
-                }
-            }
-            if (curField || curLine.length > 0) {
-                curLine.push(curField.trim());
-                if (curLine.some(f => f.length > 0)) lines.push(curLine);
-            }
-            return lines;
-        }
-
-        async function loadCSV() {
+        function loadCSV() {
             const badge = document.getElementById('record-count-badge');
-            try {
-                const res = await fetch(CSV_FILE_PATH);
-                if (!res.ok) throw new Error(`HTTP Error ${res.status}`);
-                const text = await res.text();
-                
-                const rows = parseCSVLines(text);
-                if (rows.length < 2) return;
+            
+            // Papa.parse downloads and streams directly via worker thread
+            Papa.parse(CSV_FILE_PATH, {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    if (!results.data || results.data.length === 0) {
+                        badge.innerText = "Error: CSV Empty or Not Found";
+                        badge.className = "px-2 py-0.5 text-xs bg-rose-500/20 text-rose-300 rounded border border-rose-500/30";
+                        return;
+                    }
 
-                const header = rows[0].map(h => h.toLowerCase().trim());
-                const idxNo = header.findIndex(h => h.includes('no'));
-                const idxDesc = header.findIndex(h => h.includes('desc'));
-                const idxAgency = header.findIndex(h => h.includes('agency'));
-                const idxDate = header.findIndex(h => h.includes('date'));
-                const idxSupplier = header.findIndex(h => h.includes('supplier') || h.includes('vendor'));
-                const idxAmount = header.findIndex(h => h.includes('amt') || h.includes('amount'));
+                    masterData = results.data.map((row, idx) => {
+                        const amt = parseFloat(row.awarded_amt) || 0;
+                        const dateStr = row.award_date || '';
+                        const dateObj = parseDate(dateStr);
+                        const desc = row.tender_description || '';
 
-                masterData = rows.slice(1).map((cols, idx) => {
-                    const amtRaw = cols[idxAmount >= 0 ? idxAmount : 6] || '0';
-                    const amt = parseFloat(amtRaw.replace(/[^0-9.-]+/g, '')) || 0;
-                    const dateStr = cols[idxDate >= 0 ? idxDate : 3] || '';
-                    const dateObj = parseDate(dateStr);
-                    const desc = cols[idxDesc >= 0 ? idxDesc : 1] || '';
+                        return {
+                            id: idx,
+                            tenderNo: row.tender_no || '',
+                            title: desc,
+                            agency: row.agency || 'Unknown Agency',
+                            si: row.supplier_name || 'Undisclosed Supplier',
+                            value: amt,
+                            dateObj,
+                            dateStr,
+                            category: classifyCategory(desc)
+                        };
+                    }).sort((a, b) => b.dateObj - a.dateObj);
 
-                    return {
-                        id: idx,
-                        tenderNo: cols[idxNo >= 0 ? idxNo : 0] || '',
-                        title: desc,
-                        agency: cols[idxAgency >= 0 ? idxAgency : 2] || 'Unknown Agency',
-                        si: cols[idxSupplier >= 0 ? idxSupplier : 5] || 'Undisclosed Supplier',
-                        value: amt,
-                        dateObj,
-                        dateStr,
-                        category: classifyCategory(desc)
-                    };
-                }).sort((a, b) => b.dateObj - a.dateObj);
+                    badge.innerText = `${masterData.length.toLocaleString()} GeBIZ Records Active`;
+                    badge.className = "px-2 py-0.5 text-xs bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/30";
 
-                badge.innerText = `${masterData.length.toLocaleString()} GeBIZ Records Active`;
-                badge.className = "px-2 py-0.5 text-xs bg-emerald-500/20 text-emerald-300 rounded border border-emerald-500/30";
-
-                populateDropdowns();
-                updateApp();
-            } catch (err) {
-                console.error("Fetch failed:", err);
-                badge.innerText = "Fetch Failed (Check Path/Server)";
-                badge.className = "px-2 py-0.5 text-xs bg-rose-500/20 text-rose-300 rounded border border-rose-500/30";
-            }
+                    populateDropdowns();
+                    updateApp();
+                },
+                error: function(err) {
+                    console.error("PapaParse error:", err);
+                    badge.innerText = "Fetch Failed (Check Path/Filename)";
+                    badge.className = "px-2 py-0.5 text-xs bg-rose-500/20 text-rose-300 rounded border border-rose-500/30";
+                }
+            });
         }
 
         function populateDropdowns() {
